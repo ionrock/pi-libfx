@@ -30,36 +30,52 @@ export function registerCommands(pi: ExtensionAPI): void {
           }
         }
 
-        ctx.ui.notify(lines.join("\n"), "info");
+        if (ctx.hasUI) {
+          ctx.ui.notify(lines.join("\n"), "info");
+        } else {
+          console.log(lines.join("\n"));
+        }
         return;
       }
 
       if (sub === "toggle" || sub === "mode") {
         const next = !isNativeKernelEnabled();
         setNativeKernelEnabled(next);
-        ctx.ui.setStatus(
-          "libfx",
-          next ? "⚡ libfx (native)" : undefined
-        );
-        ctx.ui.notify(
-          `libfx Native Kernel mode is now ${next ? "ENABLED" : "DISABLED"}.`,
-          "info"
-        );
+        if (ctx.hasUI) {
+          ctx.ui.setStatus(
+            "libfx",
+            next ? "⚡ libfx (native)" : undefined
+          );
+          ctx.ui.notify(
+            `libfx Native Kernel mode is now ${next ? "ENABLED" : "DISABLED"}.`,
+            "info"
+          );
+        } else {
+          console.log(`libfx Native Kernel mode is now ${next ? "ENABLED" : "DISABLED"}.`);
+        }
         return;
       }
 
       if (sub === "help") {
-        ctx.ui.notify(
+        const helpText =
           "libfx Commands:\n" +
-            "  /libfx status    - Show backend status and diagnostics\n" +
-            "  /libfx toggle    - Toggle between native Zig kernel and Pi agent loop\n" +
-            "  /login libfx     - Set Vercel AI Gateway API key",
-          "info"
-        );
+          "  /libfx status    - Show backend status and diagnostics\n" +
+          "  /libfx toggle    - Toggle between native Zig kernel and Pi agent loop\n" +
+          "  /login libfx     - Set Vercel AI Gateway API key";
+        if (ctx.hasUI) {
+          ctx.ui.notify(helpText, "info");
+        } else {
+          console.log(helpText);
+        }
         return;
       }
 
-      ctx.ui.notify(`Unknown libfx command '${sub}'. Use '/libfx help'.`, "warning");
+      const warn = `Unknown libfx command '${sub}'. Use '/libfx help'.`;
+      if (ctx.hasUI) {
+        ctx.ui.notify(warn, "warning");
+      } else {
+        console.warn(warn);
+      }
     },
   });
 }

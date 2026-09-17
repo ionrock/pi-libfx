@@ -1,8 +1,14 @@
 import type { ExtensionContext, ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { createFxAgent, getBackendInfo } from "libfx";
 import { resolveApiKey } from "./auth.js";
-import { adaptPiToolsToLibfx } from "./tools.js";
-import type { LibfxBackendStatus, SavedCheckpointEntry } from "./types.js";
+import { getHostTools, setToolExecutionListener } from "./tools.js";
+import type {
+  AssistantStreamData,
+  LibfxBackendStatus,
+  SavedCheckpointEntry,
+  ToolCardData,
+} from "./types.js";
 
 interface ActiveSession {
   agent: any;
@@ -54,7 +60,10 @@ export async function getOrCreateAgent(
   modelId?: string,
   initialCheckpoint?: Uint8Array
 ): Promise<any> {
-  const model = modelId || "google/gemini-2.5-flash-lite";
+  let model = modelId || ctx.model?.id || "google/gemini-2.5-flash-lite";
+  if (model.startsWith("libfx/")) {
+    model = model.slice("libfx/".length);
+  }
 
   if (activeSession && activeSession.model === model) {
     return activeSession.agent;
@@ -74,9 +83,22 @@ export async function getOrCreateAgent(
     );
   }
 
-  // Get active tools from Pi
-  const registeredTools = typeof pi.getAllTools === "function" ? (pi.getAllTools() as any) : [];
-  const hostTools = adaptPiToolsToLibfx(registeredTools, ctx);
+  // Restore latest checkpoint from session history if not provided
+  if (!initialCheckpoint && ctx.sessionManager?.getEntries) {
+    try {
+      const entries = ctx.sessionManager.getEntries();
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const e = entries[i] as any;
+        if (e?.type === "custom" && e?.customType === "libfx:checkpoint" && e?.data?.checkpointBase64) {
+          initialCheckpoint = Buffer.from(e.data.checkpointBase64, "base64");
+          break;
+        }
+      }
+    } catch {}
+  }
+
+  // Get active host tools for the current session working directory
+  const hostTools = getHostTools(ctx);
 
   const agent = await createFxAgent({
     apiKey,
@@ -94,6 +116,37 @@ export async function getOrCreateAgent(
   return agent;
 }
 
+function formatToolArgs(toolName: string, args: any): string {
+  if (!args) return "";
+  if (toolName === "bash" && typeof args.command === "string") {
+    return `$ ${args.command}`;
+  }
+  if ((toolName === "read" || toolName === "edit" || toolName === "write") && typeof args.path === "string") {
+    return args.path;
+  }
+  try {
+    return JSON.stringify(args);
+  } catch {
+    return String(args);
+  }
+}
+
+function formatToolResult(result: any, _isError: boolean): string {
+  if (!result) return "";
+  if (Array.isArray(result.content)) {
+    return result.content
+      .filter((c: any) => c.type === "text")
+      .map((c: any) => c.text)
+      .join("\n");
+  }
+  if (typeof result === "string") return result;
+  try {
+    return JSON.stringify(result);
+  } catch {
+    return String(result);
+  }
+}
+
 /**
  * Executes a full turn using the native Zig libfx agent.
  */
@@ -103,55 +156,194 @@ export async function runFxTurn(
   pi: ExtensionAPI
 ): Promise<void> {
   const status = await getBackendStatus();
-  ctx.ui.setStatus(
-    "libfx",
-    status.nativeAddonAvailable ? "⚡ libfx (native)" : "⚡ libfx (wasm)"
-  );
+  if (ctx.hasUI) {
+    ctx.ui.setStatus(
+      "libfx",
+      status.nativeAddonAvailable ? "⚡ libfx (running)" : "⚡ libfx (wasm running)"
+    );
+    ctx.ui.setWorkingMessage("Thinking...");
+    ctx.ui.setWorkingVisible(true);
+  }
 
   let agent: any;
   try {
     agent = await getOrCreateAgent(ctx, pi);
   } catch (err) {
-    ctx.ui.notify(
-      err instanceof Error ? err.message : String(err),
-      "error"
-    );
+    const msg = err instanceof Error ? err.message : String(err);
+    if (ctx.hasUI) {
+      ctx.ui.notify(msg, "error");
+    } else {
+      console.error(msg);
+    }
     return;
   }
 
   const controller = new AbortController();
   const turn = agent.prompt(promptText, { signal: controller.signal });
 
-  let fullText = "";
-  let fullReasoning = "";
+  // Stream entries & tool cards management
+  let activeStream: AssistantStreamData | null = null;
+  const activeToolCards = new Map<string, ToolCardData>();
+
+  function getOrCreateStream(): AssistantStreamData {
+    if (!activeStream) {
+      activeStream = {
+        content: [],
+        isStreaming: true,
+      };
+      if (ctx.hasUI) {
+        pi.appendEntry("libfx:assistant", activeStream);
+      }
+    }
+    return activeStream;
+  }
+
+  function toAssistantMessage(content: AssistantStreamData["content"]): AssistantMessage {
+    return {
+      role: "assistant",
+      content: content.map((c) => {
+        if (c.type === "thinking") {
+          return { type: "thinking" as const, thinking: c.thinking };
+        }
+        return { type: "text" as const, text: c.text };
+      }),
+      api: "openai-completions",
+      provider: "libfx",
+      model: "libfx",
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } as any,
+      stopReason: "stop",
+      timestamp: Date.now(),
+    };
+  }
+
+  function flushActiveStream(): void {
+    if (activeStream) {
+      activeStream.isStreaming = false;
+      if (activeStream.component) {
+        activeStream.component.updateContent(toAssistantMessage(activeStream.content), false);
+      }
+      activeStream = null;
+    }
+  }
+
+  // Throttle render requests to prevent UI lag on high token rates (~25fps)
+  let lastRender = 0;
+  let renderTimer: NodeJS.Timeout | null = null;
+
+  function triggerUiRender(statusLabel = "⚡ libfx (streaming)") {
+    if (!ctx.hasUI) return;
+    const now = Date.now();
+    if (now - lastRender > 40) {
+      lastRender = now;
+      if (renderTimer) {
+        clearTimeout(renderTimer);
+        renderTimer = null;
+      }
+      ctx.ui.setStatus("libfx", statusLabel);
+    } else if (!renderTimer) {
+      renderTimer = setTimeout(() => {
+        renderTimer = null;
+        lastRender = Date.now();
+        ctx.ui.setStatus("libfx", statusLabel);
+      }, 40);
+    }
+  }
+
+  // Hook host tool execution into the UI presentation
+  setToolExecutionListener({
+    onStart(toolCallId, toolName, input) {
+      // Finalize any assistant text streamed before this tool started
+      flushActiveStream();
+
+      const toolCard: ToolCardData = {
+        toolName,
+        toolCallId,
+        args: input,
+        isComplete: false,
+      };
+      activeToolCards.set(toolCallId, toolCard);
+
+      if (ctx.hasUI) {
+        pi.appendEntry("libfx:tool", toolCard);
+        ctx.ui.setWorkingMessage(`Running ${toolName}...`);
+        ctx.ui.setStatus("libfx", `⚡ libfx (${toolName})`);
+      } else if (ctx.mode === "print") {
+        process.stdout.write(`\n\x1b[1;36m[tool: ${toolName}]\x1b[0m ${formatToolArgs(toolName, input)}\n`);
+      }
+    },
+    onUpdate(toolCallId, update) {
+      const card = activeToolCards.get(toolCallId);
+      if (card?.component) {
+        card.component.updateResult(update);
+        triggerUiRender(`⚡ libfx (${card.toolName})`);
+      }
+    },
+    onEnd(toolCallId, result, isError) {
+      const card = activeToolCards.get(toolCallId);
+      if (card) {
+        card.result = result;
+        card.isError = isError;
+        card.isComplete = true;
+        if (card.component) {
+          card.component.setArgsComplete();
+          card.component.updateResult(result);
+          triggerUiRender("⚡ libfx (running)");
+        }
+      }
+      if (ctx.hasUI) {
+        ctx.ui.setWorkingMessage("Thinking...");
+        ctx.ui.setStatus("libfx", "⚡ libfx (running)");
+      } else if (ctx.mode === "print") {
+        const out = formatToolResult(result, isError);
+        if (out) {
+          process.stdout.write(`\x1b[2m${out}\x1b[0m\n\n`);
+        }
+      }
+    },
+  });
 
   try {
     for await (const event of turn) {
-      if (event.type === "text_delta") {
-        fullText += event.delta;
-      } else if (event.type === "reasoning_delta") {
-        fullReasoning += event.delta;
-      } else if (event.type === "tool_start") {
-        ctx.ui.setStatus("libfx-tool", `Running ${event.name}...`);
-      } else if (event.type === "tool_end") {
-        ctx.ui.setStatus("libfx-tool", undefined);
+      if (event.type === "reasoning_delta") {
+        if (ctx.hasUI) {
+          const stream = getOrCreateStream();
+          let item = stream.content.find((c) => c.type === "thinking") as
+            | { type: "thinking"; thinking: string }
+            | undefined;
+          if (!item) {
+            item = { type: "thinking", thinking: "" };
+            const textIndex = stream.content.findIndex((c) => c.type === "text");
+            if (textIndex >= 0) {
+              stream.content.splice(textIndex, 0, item);
+            } else {
+              stream.content.push(item);
+            }
+          }
+          item.thinking += event.delta;
+          stream.component?.updateContent(toAssistantMessage(stream.content), true);
+          triggerUiRender("⚡ libfx (thinking...)");
+        }
+      } else if (event.type === "text_delta") {
+        if (ctx.hasUI) {
+          const stream = getOrCreateStream();
+          let item = stream.content.find((c) => c.type === "text") as
+            | { type: "text"; text: string }
+            | undefined;
+          if (!item) {
+            item = { type: "text", text: "" };
+            stream.content.push(item);
+          }
+          item.text += event.delta;
+          stream.component?.updateContent(toAssistantMessage(stream.content), true);
+          triggerUiRender("⚡ libfx (streaming)");
+        } else if (ctx.mode === "print") {
+          process.stdout.write(event.delta);
+        }
       }
     }
 
-    const result = await turn.result;
-
-    // Send the completed assistant message into Pi's transcript
-    if (fullText.length > 0) {
-      pi.sendMessage({
-        customType: "libfx:assistant",
-        content: fullText,
-        display: true,
-        details: {
-          reasoning: fullReasoning || undefined,
-          usage: result?.usage,
-          stopReason: result?.stopReason,
-        },
-      });
+    if (ctx.mode === "print") {
+      process.stdout.write("\n");
     }
 
     // Persist checkpoint for multi-turn session durability
@@ -168,15 +360,32 @@ export async function runFxTurn(
     } catch {}
   } catch (error) {
     if (controller.signal.aborted) {
-      ctx.ui.notify("Turn cancelled.", "warning");
+      if (ctx.hasUI) {
+        ctx.ui.notify("Turn cancelled.", "warning");
+      }
     } else {
-      ctx.ui.notify(
-        `libfx error: ${error instanceof Error ? error.message : String(error)}`,
-        "error"
-      );
+      const msg = `libfx error: ${error instanceof Error ? error.message : String(error)}`;
+      if (ctx.hasUI) {
+        ctx.ui.notify(msg, "error");
+      } else {
+        console.error(msg);
+      }
     }
   } finally {
-    ctx.ui.setStatus("libfx-tool", undefined);
+    setToolExecutionListener(null);
+    if (renderTimer) {
+      clearTimeout(renderTimer);
+      renderTimer = null;
+    }
+    flushActiveStream();
+
+    if (ctx.hasUI) {
+      ctx.ui.setWorkingVisible(false);
+      ctx.ui.setStatus(
+        "libfx",
+        status.nativeAddonAvailable ? "⚡ libfx (native)" : "⚡ libfx (wasm)"
+      );
+    }
   }
 }
 

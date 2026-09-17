@@ -36,3 +36,26 @@ export interface SavedCheckpointEntry {
   timestamp: number;
   model?: string;
 }
+
+export interface ToolCardData {
+  toolName: string;
+  toolCallId: string;
+  args: any;
+  result?: any;
+  isError?: boolean;
+  isComplete: boolean;
+  component?: any;
+}
+
+export interface AssistantStreamData {
+  content: Array<{ type: "thinking"; thinking: string } | { type: "text"; text: string }>;
+  isStreaming: boolean;
+  component?: any;
+}
+
+export interface ToolExecutionListener {
+  onStart?: (toolCallId: string, toolName: string, input: any) => void;
+  onUpdate?: (toolCallId: string, update: any) => void;
+  onEnd?: (toolCallId: string, result: any, isError: boolean) => void;
+}
+
