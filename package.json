@@ -1,0 +1,68 @@
+{
+  "name": "pi-libfx",
+  "version": "0.1.0",
+  "description": "Accelerate Pi with the high-performance native Zig agent kernel from fx",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "fx",
+    "libfx",
+    "ai-gateway",
+    "agent"
+  ],
+  "author": "Eric Larson",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/ionrock/pi-libfx#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ionrock/pi-libfx.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ionrock/pi-libfx/issues"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "themes",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "libfx": "file:../fx/sdk"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@types/node": "*",
+    "typebox": "*",
+    "typescript": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "themes": [
+      "./themes/libfx-dark.json"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  }
+}

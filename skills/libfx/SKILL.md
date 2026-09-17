@@ -1,0 +1,26 @@
+---
+name: libfx
+description: Native Zig agent acceleration engine for Pi powered by fx and the Vercel AI Gateway. Use whenever the user asks about fx, libfx, agent speed, native Zig addons, or gateway models.
+---
+
+# libfx Agent Acceleration
+
+`libfx` is the native agent kernel from `fx` compiled directly in Zig 0.16. It powers fast prompt-to-first-token execution, lossless backpressured streaming, and lightweight memory consumption.
+
+## Key Capabilities
+
+1. **Native Zig Agent Loop:**
+   - Powered by a headless native Node-API addon (`libfx.<platform>-<arch>.node`) or WebAssembly with JSPI fallback.
+   - Bounded ACP (Agent Client Protocol) communication between Zig worker threads and the JavaScript host.
+
+2. **Vercel AI Gateway Integration:**
+   - Global low-latency routing to leading models across Anthropic, OpenAI, Google, DeepSeek, and more.
+   - Dynamic model discovery with `/model libfx/...`.
+
+3. **Checkpoints & Session Resumption:**
+   - Bounded, versioned opaque checkpoints preserve conversation context and usage across turns and restarts.
+
+4. **Slash Commands:**
+   - `/libfx status`: Check whether native Zig N-API or Wasm is active.
+   - `/libfx toggle`: Switch between native Zig ACP execution and standard Pi agent loop.
+   - `/login libfx`: Set or update the Gateway API key.
