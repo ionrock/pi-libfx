@@ -1,3 +1,5 @@
+export type LibfxArchitecture = "acp" | "plugin";
+
 export interface LibfxConfig {
   /** Gateway API key (defaults to AI_GATEWAY_API_KEY environment variable) */
   apiKey?: string;
@@ -5,8 +7,8 @@ export interface LibfxConfig {
   gatewayChatUrl?: string;
   /** Active backend execution mode: auto (prefer native), native, or wasm */
   backend: "auto" | "native" | "wasm";
-  /** Whether the full native Zig agent loop is active (intercepts input) */
-  nativeKernel: boolean;
+  /** Architecture mode: acp (native Zig ACP agent loop) or plugin (standard Pi agent loop) */
+  arch: LibfxArchitecture;
   /** Default model ID to use when none is explicitly selected */
   defaultModel: string;
 }

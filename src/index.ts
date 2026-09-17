@@ -11,7 +11,9 @@ import { registerCommands } from "./commands.js";
 import {
   closeActiveAgent,
   getBackendStatus,
+  getLibfxArchitecture,
   isNativeKernelEnabled,
+  resolveInitialArchitecture,
   runFxTurn,
 } from "./kernel.js";
 import { getToolDefinition } from "./tools.js";
@@ -24,8 +26,18 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   // 1. Register the libfx provider and dynamic model refresh
   registerLibfxProvider(pi);
 
-  // 2. Register slash commands (/libfx status, /libfx toggle, etc.)
+  // 2. Register slash commands (/libfx status, /libfx arch, /libfx toggle, etc.)
   registerCommands(pi);
+
+  // 2b. Register architecture flag: --libfx-arch <acp|plugin>
+  pi.registerFlag("libfx-arch", {
+    description: "libfx architecture mode: 'acp' (native Zig ACP agent loop) or 'plugin' (standard Pi provider loop)",
+    type: "string",
+    default: "acp",
+  });
+
+  // Resolve initial architecture from CLI flag, env, config, or default
+  resolveInitialArchitecture(pi);
 
   // 3. Register custom entry renderers for interactive transcript parity
 
@@ -153,18 +165,23 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   // 4. Setup footer status on session start
   pi.on("session_start", async (_event, ctx) => {
     if (!ctx.hasUI) return;
+    const arch = resolveInitialArchitecture(pi, ctx.cwd);
     const status = await getBackendStatus();
-    if (status.nativeAddonAvailable) {
-      ctx.ui.setStatus("libfx", "⚡ libfx (native)");
-    } else if (status.backend === "wasm-jspi") {
-      ctx.ui.setStatus("libfx", "⚡ libfx (wasm)");
+
+    if (arch === "acp") {
+      ctx.ui.setStatus(
+        "libfx",
+        status.nativeAddonAvailable ? "⚡ libfx (acp-native)" : "⚡ libfx (acp-wasm)"
+      );
+    } else {
+      ctx.ui.setStatus("libfx", "⚡ libfx (plugin)");
     }
   });
 
-  // 5. Intercept user input when native kernel mode is enabled
+  // 5. Intercept user input when native ACP kernel architecture is active
   pi.on("input", async (event, ctx) => {
-    // If native kernel mode is not enabled, let Pi's standard agent loop run
-    if (!isNativeKernelEnabled()) {
+    // If not in ACP mode (i.e. in plugin mode), let Pi's standard agent loop run
+    if (getLibfxArchitecture() !== "acp") {
       return { action: "continue" };
     }
 

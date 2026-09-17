@@ -1,3 +1,6 @@
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionContext, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { createFxAgent, getBackendInfo } from "libfx";
@@ -5,6 +8,7 @@ import { resolveApiKey } from "./auth.js";
 import { getHostTools, setToolExecutionListener } from "./tools.js";
 import type {
   AssistantStreamData,
+  LibfxArchitecture,
   LibfxBackendStatus,
   SavedCheckpointEntry,
   ToolCardData,
@@ -17,14 +21,98 @@ interface ActiveSession {
 }
 
 let activeSession: ActiveSession | null = null;
-let nativeKernelEnabled = true;
+let activeArchitecture: LibfxArchitecture = "acp";
+
+export function getLibfxArchitecture(): LibfxArchitecture {
+  return activeArchitecture;
+}
+
+export function setLibfxArchitecture(arch: LibfxArchitecture): void {
+  activeArchitecture = arch;
+}
 
 export function isNativeKernelEnabled(): boolean {
-  return nativeKernelEnabled;
+  return activeArchitecture === "acp";
 }
 
 export function setNativeKernelEnabled(enabled: boolean): void {
-  nativeKernelEnabled = enabled;
+  activeArchitecture = enabled ? "acp" : "plugin";
+}
+
+/**
+ * Resolves initial architecture from CLI flag, environment variable, persistent config, or default.
+ */
+export function resolveInitialArchitecture(pi?: ExtensionAPI, cwd?: string): LibfxArchitecture {
+  // 1. CLI flag: --libfx-arch <acp|plugin>
+  try {
+    const flag = pi?.getFlag?.("libfx-arch");
+    if (typeof flag === "string") {
+      const norm = flag.trim().toLowerCase();
+      if (norm === "acp" || norm === "plugin" || norm === "provider") {
+        const arch: LibfxArchitecture = norm === "provider" ? "plugin" : (norm as LibfxArchitecture);
+        setLibfxArchitecture(arch);
+        return arch;
+      }
+    }
+  } catch {}
+
+  // 2. Environment variable: LIBFX_ARCH or LIBFX_MODE
+  const envVal = (process.env.LIBFX_ARCH || process.env.LIBFX_MODE || "").trim().toLowerCase();
+  if (envVal === "acp" || envVal === "plugin" || envVal === "provider") {
+    const arch: LibfxArchitecture = envVal === "provider" ? "plugin" : (envVal as LibfxArchitecture);
+    setLibfxArchitecture(arch);
+    return arch;
+  }
+
+  // 3. Persistent config in local .pi/libfx.json
+  try {
+    const localConfig = join(cwd || process.cwd(), ".pi", "libfx.json");
+    if (existsSync(localConfig)) {
+      const data = JSON.parse(readFileSync(localConfig, "utf8"));
+      if (data?.arch === "acp" || data?.arch === "plugin") {
+        setLibfxArchitecture(data.arch);
+        return data.arch;
+      }
+    }
+  } catch {}
+
+  // 4. Persistent config in global ~/.pi/agent/libfx.json
+  try {
+    const globalConfig = join(homedir(), ".pi", "agent", "libfx.json");
+    if (existsSync(globalConfig)) {
+      const data = JSON.parse(readFileSync(globalConfig, "utf8"));
+      if (data?.arch === "acp" || data?.arch === "plugin") {
+        setLibfxArchitecture(data.arch);
+        return data.arch;
+      }
+    }
+  } catch {}
+
+  setLibfxArchitecture("acp");
+  return "acp";
+}
+
+/**
+ * Persists the chosen architecture to the local .pi/libfx.json or global ~/.pi/agent/libfx.json.
+ */
+export function saveLibfxArchitecture(arch: LibfxArchitecture, cwd?: string): boolean {
+  setLibfxArchitecture(arch);
+  try {
+    const localDir = join(cwd || process.cwd(), ".pi");
+    if (existsSync(localDir)) {
+      const configPath = join(localDir, "libfx.json");
+      writeFileSync(configPath, JSON.stringify({ arch }, null, 2), "utf8");
+      return true;
+    }
+
+    const globalDir = join(homedir(), ".pi", "agent");
+    if (existsSync(globalDir)) {
+      const configPath = join(globalDir, "libfx.json");
+      writeFileSync(configPath, JSON.stringify({ arch }, null, 2), "utf8");
+      return true;
+    }
+  } catch {}
+  return false;
 }
 
 /**
@@ -159,7 +247,7 @@ export async function runFxTurn(
   if (ctx.hasUI) {
     ctx.ui.setStatus(
       "libfx",
-      status.nativeAddonAvailable ? "⚡ libfx (running)" : "⚡ libfx (wasm running)"
+      status.nativeAddonAvailable ? "⚡ libfx (acp-native running)" : "⚡ libfx (acp-wasm running)"
     );
     ctx.ui.setWorkingMessage("Thinking...");
     ctx.ui.setWorkingVisible(true);
@@ -383,7 +471,7 @@ export async function runFxTurn(
       ctx.ui.setWorkingVisible(false);
       ctx.ui.setStatus(
         "libfx",
-        status.nativeAddonAvailable ? "⚡ libfx (native)" : "⚡ libfx (wasm)"
+        status.nativeAddonAvailable ? "⚡ libfx (acp-native)" : "⚡ libfx (acp-wasm)"
       );
     }
   }
