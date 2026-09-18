@@ -52,7 +52,8 @@
     "@earendil-works/pi-tui": "*",
     "@types/node": "*",
     "typebox": "*",
-    "typescript": "*"
+    "typescript": "*",
+    "vitest": "^5.0.1"
   },
   "pi": {
     "extensions": [
